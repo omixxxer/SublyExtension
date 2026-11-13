@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Build the production package for the Chrome Web Store
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Type check, tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc -b
+
+      - name: Tests
+        run: npx vitest --run
+
+      - name: Build extension
+        run: npx vite build --config vite.extension.config.ts
+        env:
+          VITE_BUILD_MODE: prod
+          # Placeholder so the build can finish; store packages come from the job below.
+          VITE_OAUTH_CLIENT_ID_PROD: ci-placeholder.apps.googleusercontent.com
+
+  package:
+    name: Chrome Web Store package
+    # Run manually: Actions > CI > Run workflow > tick "Build the production package".
+    if: github.event_name == 'workflow_dispatch' && inputs.package
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build production extension
+        # Fails if the VITE_OAUTH_CLIENT_ID_PROD repository secret is not set.
+        run: npm run build:ext:prod
+        env:
+          VITE_OAUTH_CLIENT_ID_PROD: ${{ secrets.VITE_OAUTH_CLIENT_ID_PROD }}
+
+      - name: Upload package
+        # The downloaded artifact is a zip with manifest.json at its root,
+        # ready to upload to the Chrome Web Store.
+        uses: actions/upload-artifact@v4
+        with:
+          name: subly-extension-${{ github.sha }}
+          path: dist-ext/
+          if-no-files-found: error

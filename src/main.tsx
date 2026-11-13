@@ -4,6 +4,7 @@ import { RouterProvider, createHashRouter } from 'react-router-dom'
 import { routes } from './routes'
 import { StoreProvider } from './store'
 import { ToastProvider } from './components/Toast'
+import { PersistenceNotifier } from './components/PersistenceNotifier'
 import { useI18n } from './lib/i18n'
 import './styles.css'
 
@@ -18,6 +19,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <StoreProvider>
       <ToastProvider>
+        <PersistenceNotifier />
         <Suspense fallback={<LoadingFallback />}>
           <RouterProvider router={router} />
         </Suspense>

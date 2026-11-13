@@ -1,6 +1,69 @@
 import type { AppSettings, AppState, Subscription } from './types'
+import { logger } from './logger'
 
 const KEY = 'subly:state'
+
+/** chrome.storage / localStorage key holding the persisted state. */
+export const STATE_STORAGE_KEY = KEY
+
+/**
+ * Version of the persisted data shape. Bump it whenever a change needs existing
+ * user data to be transformed, and add the matching step to MIGRATIONS.
+ */
+export const CURRENT_SCHEMA_VERSION = 1
+
+/** What is actually written to storage: the app state plus its schema version. */
+export type StoredState = AppState & { schemaVersion: number }
+
+type RawState = Record<string, unknown>
+
+/**
+ * MIGRATIONS[n] upgrades data stored at schemaVersion n to n + 1.
+ * Never edit or remove a released step: some users may still have data at that version.
+ * Field-level cleanup that should always apply (defaults, clamping, legacy `category`)
+ * stays in normalizeState, which runs after the migrations.
+ */
+const MIGRATIONS: Record<number, (raw: RawState) => RawState> = {
+  // v0 -> v1: baseline. v0 is everything saved before data was versioned.
+  0: (raw) => raw,
+}
+
+export function readSchemaVersion(input: unknown): number {
+  const v = (input as { schemaVersion?: unknown } | null | undefined)?.schemaVersion
+  return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : 0
+}
+
+/** Runs every pending migration on raw persisted data. Returns null for non-objects. */
+export function migrateState(input: unknown): RawState | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+
+  let data: RawState = { ...(input as RawState) }
+  let version = readSchemaVersion(data)
+
+  if (version > CURRENT_SCHEMA_VERSION) {
+    // Data written by a newer build (e.g. a backup restored from a newer version).
+    // Best effort: normalizeState keeps the fields this build understands.
+    logger.warn('Stored data has a newer schema than this build', {
+      context: 'migrateState',
+      details: { stored: version, current: CURRENT_SCHEMA_VERSION },
+    })
+    return data
+  }
+
+  while (version < CURRENT_SCHEMA_VERSION) {
+    const step = MIGRATIONS[version]
+    if (!step) throw new Error(`Missing data migration from schema v${version}`)
+    data = step(data)
+    version += 1
+  }
+  data.schemaVersion = version
+  return data
+}
+
+/** Adds the schema version to the state so it can be written to storage. */
+export function serializeState(state: AppState): StoredState {
+  return { ...state, schemaVersion: CURRENT_SCHEMA_VERSION }
+}
 
 export const DEFAULT_SETTINGS: AppSettings = {
   language: 'es',
@@ -15,7 +78,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   driveLastBackupAt: undefined,
 }
 
-export function normalizeState(input: Partial<AppState> | null | undefined): AppState {
+export function normalizeState(raw: unknown): AppState {
+  const input = migrateState(raw) as Partial<AppState> | null
   const rawSubscriptions = Array.isArray(input?.subscriptions) ? input!.subscriptions : []
   const subscriptions = rawSubscriptions.map((sub) => {
     const list = [
@@ -84,33 +148,75 @@ function isExtension() {
   return typeof chrome !== 'undefined' && !!chrome.storage?.local
 }
 
-export async function loadState(): Promise<AppState> {
+/**
+ * Reads the persisted data exactly as stored (null when nothing is saved yet).
+ * Throws when storage can't be read or holds unparseable data, so callers never
+ * mistake a failed read for an empty account and overwrite real data.
+ */
+export async function readStoredState(): Promise<unknown> {
   if (isExtension()) {
     const res = await chrome.storage.local.get([KEY])
-    return normalizeState((res?.[KEY] as AppState) ?? null)
+    return res?.[KEY] ?? null
   }
 
   const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(KEY) : null
-  if (!raw) return normalizeState(null)
-  try {
-    return normalizeState(JSON.parse(raw) as AppState)
-  } catch {
-    return normalizeState(null)
+  if (!raw) return null
+  return JSON.parse(raw)
+}
+
+export async function loadState(): Promise<AppState> {
+  return normalizeState(await readStoredState())
+}
+
+/** Writes already-serialized state. */
+export async function writeStoredState(stored: StoredState): Promise<void> {
+  if (isExtension()) {
+    await chrome.storage.local.set({ [KEY]: stored })
+    return
+  }
+  if (typeof localStorage !== 'undefined') {
+    localStorage.setItem(KEY, JSON.stringify(stored))
   }
 }
 
 export async function saveState(state: AppState): Promise<void> {
-  if (isExtension()) {
-    await chrome.storage.local.set({ [KEY]: state })
-    return
+  await writeStoredState(serializeState(state))
+}
+
+/**
+ * Subscribes to changes of the persisted state made by other extension pages
+ * (another side panel window, etc.). Returns an unsubscribe function.
+ */
+export function onStoredStateChanged(listener: (raw: unknown) => void): () => void {
+  if (isExtension() && chrome.storage?.onChanged) {
+    const handler = (changes: Record<string, chrome.storage.StorageChange>, areaName: string) => {
+      if (areaName !== 'local' || !changes[KEY]) return
+      listener(changes[KEY].newValue ?? null)
+    }
+    chrome.storage.onChanged.addListener(handler)
+    return () => chrome.storage.onChanged.removeListener(handler)
   }
-  if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(KEY, JSON.stringify(state))
+
+  if (typeof window !== 'undefined') {
+    // Web build: the storage event fires in other tabs of the same origin.
+    const handler = (e: StorageEvent) => {
+      if (e.key !== KEY) return
+      try {
+        listener(e.newValue ? JSON.parse(e.newValue) : null)
+      } catch {
+        // Ignore unparseable writes from elsewhere.
+      }
+    }
+    window.addEventListener('storage', handler)
+    return () => window.removeEventListener('storage', handler)
   }
+
+  return () => {}
 }
 
 export function createId(): string {
-  // Good enough for local ids; if you later sync to a DB, use UUID.
+  const c = globalThis.crypto
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID()
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 

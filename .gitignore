@@ -32,8 +32,7 @@ lerna-debug.log*
 *.swo
 *~
 
-# Package manager files
-package-lock.json
+# Package manager files (package-lock.json IS committed for reproducible builds)
 yarn.lock
 pnpm-lock.yaml
 
@@ -41,5 +40,12 @@ pnpm-lock.yaml
 *.zip
 subly-extension-*.zip
 
+# TypeScript incremental build info
+*.tsbuildinfo
+
+# Nested repo / stray folder
+/SublyExtension/
+
 # OS files
 Thumbs.db
+desktop.ini
